@@ -5,8 +5,7 @@ NAME
 SYNOPSIS
      use Net::TcpDumpLog;
 
-     $log = Net::TcpDumpLog->new(); 
-     $log->read("/tmp/out01");
+     $log = Net::TcpDumpLog->new(); $log->read("/tmp/out01");
 
      @Indexes = $log->indexes;
 
@@ -25,8 +24,17 @@ DESCRIPTION
 
 METHODS
      new ()
-         Constructor, return a TcpDumpLog object. If your OS uses
-         64-bit timestamps, supply an argument of "64".
+         Constructor, return a TcpDumpLog object.
+
+     new (BITS)
+         This optional argument is to force reading timestamps of
+         that number of bits. eg new(32). Could be needed when
+         processing tcpdumps from one OS on another.
+
+     new (BITS,SKIP)
+         This second options argument is how many bytes to skip
+         for every record header.  "SuSE linux 6.3" style logs
+         need this set to 4, everything else (so far) is 0.
 
      read (FILENAME)
          Read the tcpdump file indicated into memory.
@@ -95,10 +103,15 @@ LIMITATIONS
 
 BUGS
      If this module is not reading your logs correctly, try
-     creating the tcpdump object in 64-bit timestamp mode, eg
-     "$log = Net::TcpDumpLog->new(64);". If the problem persists,
-     try printing out the log version using version() and
-     checking it is "2.4".
+     forcing the timestamp bits to either 32 or 64, eg "$log =
+     Net::TcpDumpLog->new(32);". Also try printing out the log
+     version using version() and checking it is "2.4".
+
+     There is a certain tcpdump log format "SuSE linux 6.3" that
+     put extra fields in the log without any clear identifier. If
+     you think you have this log, put a "4" as a second argument
+     to new, eg "$log = Net::TcpDumpLog->new(32,4);".  (The 4
+     specifies how many extra header bytes to skip).
 
 TODO
      Future versions should include the ability to write as well

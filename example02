@@ -1,4 +1,4 @@
-#!/bin/perl
+#!/usr/bin/perl
 #
 # example02.pl - Example of Net::TcpDumpLog. Prints out ethernet headers.
 #
@@ -6,8 +6,9 @@
 
 use Net::TcpDumpLog;
 
-$log = Net::TcpDumpLog->new;
-$log->read("tcpdumplog");
+$log = Net::TcpDumpLog->new(32);	# Don't copy the "32"! This is only
+$log->read("tcpdumplog");		#  used here because our sample file
+					#  has 32-bit timestamps. use new().
 
 @Indexes = $log->indexes;
 

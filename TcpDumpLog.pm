@@ -3,27 +3,30 @@
 # TcpDumpLog.pm - Net::TcpDumpLog library to read tcpdump/libpcap files.
 #
 # 17-Oct-2003   Brendan Gregg
+# 19-Oct-2003	Brendan Gregg	Added code to check endian of files.
 
 package Net::TcpDumpLog;
 
 use strict;
 use vars qw($VERSION);
-#use warnings;
 
-$VERSION = '0.10';
+$VERSION = '0.11';
 
 # new - create the tcpdump object.
 # 	An optional argument is the number of bits this OS uses to store
-#	times (usually 32-bits (Oct 2003)). If an OS is using 64-bit values, 
-#	then the actual tcpdump/libpcap file format changes - so this is
-#	quite important. Currrntly only 32-bit and 64-bit times are supported.
+#	times. Without this argument, this will use whatever the OS thinks
+#	it should use. By using this argument (32/64) you can force 
+#	behaviour, which may be useful when transferring logs from one
+#	OS to another. Why this is so important is that the actual 
+#	tcpdump/libpcap file format changes depending on the bits.
 #
 sub new {
 	my $proto = shift;
 	my $class = ref($proto) || $proto;
 	my $self = {};
 
-	my $bits = shift || 32;		# Default
+	my $bits = shift;
+	my $skip = shift;
 
 	$self->{major} = undef;
 	$self->{minor} = undef;
@@ -31,6 +34,7 @@ sub new {
 	$self->{accuracy} = undef;
 	$self->{dumplength} = undef;
 	$self->{linktype} = undef;
+	$self->{bigendian} = undef;
 	$self->{data} = [];
 	$self->{length_orig} = [];
 	$self->{length_inc} = [];
@@ -38,11 +42,18 @@ sub new {
 	$self->{seconds} = [];
 	$self->{msecs} = [];
 	$self->{count} = 0;
+	$self->{sizeint} = length(pack("I",0));
 
-	if ($bits == 64) {
+	if (defined $bits && $bits == 64) {
 		$self->{bits} = 64;
+	} elsif (defined $bits && $bits == 32) {
+		$self->{bits} = 32;	
 	} else {
-		$self->{bits} = 32;	# Default
+		$self->{bits} = 0;	# Use native OS bits
+	}
+
+	if (defined $skip && $skip > 0) {
+		$self->{skip} = $skip;
 	}
 
 	bless($self,$class);
@@ -57,23 +68,75 @@ sub read {
         my ($header,$length,$ident,$version,$linktype,$header_rec,
          $zoneoffset,$accuracy,$frame_length_inc,$frame_length_orig,
 	 $frame_drops,$frame_seconds,$frame_msecs,$frame_data,
-	 $skip,$pad,$major,$minor,$dumplength);
+	 $pad,$major,$minor,$dumplength,$rest,$more);
         $self->{count} = 0;
         my $num = 0;
 
         ### Open tcpdump file
         open(TCPDUMPFILE,"$file") ||
          die "ERROR: Can't read log $file: $!\n";
+	binmode(TCPDUMPFILE);		# backward OSs
 
         ### Fetch tcpdump header
         $length = read(TCPDUMPFILE,$header,24);
         die "ERROR: Can't read from log $file\n" if $length < 24;
 
         ### Check file really is a tcpdump file
-        ($ident,$major,$minor,$zoneoffset,$accuracy,$dumplength,
-	 $linktype) = unpack('a4SSIIII',$header);
-	if ($ident !~ /^\241\262\303\324/) {
-	        die "ERROR: Not a tcpdump file $file\n";
+	($ident,$rest) = unpack('a4a20',$header);
+
+	if ($ident !~ /^\241\262\303\324/ &&
+	    $ident !~ /^\324\303\262\241/ &&
+	    $ident !~ /^\241\262\315\064/ &&
+	    $ident !~ /^\064\315\262\241/){
+	        die "ERROR: Not a tcpdump file (or unknown version) $file\n";
+	}
+
+	### Find out what type of tcpdump file it is
+        if ($ident =~ /^\241\262\303\324/) { 
+		#
+		#  Standard format big endian, header "a1b2c3d4"
+		#  Seen from: 
+		#	Solaris tcpdump
+		#	Solaris Ethereal "libpcap" format
+		#
+		$self->{style} = "standard1"; 
+		$self->{bigendian} = 1;
+        	($ident,$major,$minor,$zoneoffset,$accuracy,$dumplength,
+		 $linktype) = unpack('a4nnNNNN',$header);
+	}
+        if ($ident =~ /^\324\303\262\241/) { 
+		#
+		#  Standard format little endian, header "d4c3b2a1"
+		#  Seen from:
+		#	Windows Ethereal "libpcap" format
+		#
+		$self->{style} = "standard2"; 
+		$self->{bigendian} = 0;
+        	($ident,$major,$minor,$zoneoffset,$accuracy,$dumplength,
+		 $linktype) = unpack('a4vvVVVV',$header);
+	}
+        if ($ident =~ /^\241\262\315\064/) {
+		#
+		#  Modified format big endian, header "a1b2cd34"
+		#  Seen from:
+		#	Solaris Ethereal "modified" format
+		#
+		$self->{style} = "modified1"; 
+		$self->{bigendian} = 1;
+        	($ident,$major,$minor,$zoneoffset,$accuracy,$dumplength,
+		 $linktype) = unpack('a4nnNNNN',$header);
+	}
+        if ($ident =~ /^\064\315\262\241/) { 
+		#
+		#  Modified format little endian, header "cd34a1b2"
+		#  Seen from:
+		#	Red Hat tcpdump
+		#	Windows Ethereal "modified" format
+		#
+		$self->{style} = "modified2"; 
+		$self->{bigendian} = 0;
+        	($ident,$major,$minor,$zoneoffset,$accuracy,$dumplength,
+		 $linktype) = unpack('a4vvVVVV',$header);
 	}
 
         ### Store values
@@ -93,7 +156,7 @@ sub read {
 	
 		if ($self->{bits} == 64) {
 			#
-			#  64-bit timestamps
+			#  64-bit timestamps, quads
 			#
 
        		        ### Fetch record header
@@ -104,10 +167,11 @@ sub read {
 
 			### Unpack header
                 	($frame_seconds,$frame_msecs,$frame_length_inc,
-			 $frame_length_orig) = unpack('QQII',$header_rec);
-		} else {
+			 $frame_length_orig) = unpack('QQLL',$header_rec);
+
+		} elsif ($self->{bits} == 32) {
 			#
-			#  32-bit timestamps
+			#  32-bit timestamps, big-endian
 			#
 
 	                ### Fetch record header
@@ -117,10 +181,64 @@ sub read {
                 	last if $length < 16;
 
 			### Unpack header
-                	($frame_seconds,$frame_msecs,$frame_length_inc,
-			 $frame_length_orig) = unpack('IIII',$header_rec);
+			if ($self->{bigendian}) {
+				($frame_seconds,$frame_msecs,
+				 $frame_length_inc,$frame_length_orig) 
+				 = unpack('NNNN',$header_rec);
+			} else {
+				($frame_seconds,$frame_msecs,
+				 $frame_length_inc,$frame_length_orig) 
+				 = unpack('VVVV',$header_rec);
+			}
+
+		} else {
+			#
+			#  Default to OS native timestamps
+			#
+
+	                ### Fetch record header
+	                $length = read(TCPDUMPFILE,$header_rec,
+			 ($self->{sizeint} * 2 + 8) );
+
+	                ### Quit loop if at end of file
+                	last if $length < ($self->{sizeint} * 2 + 8);
+
+			### Unpack header
+			if ($self->{sizeint} == 4) {	# 32-bit
+				if ($self->{bigendian}) {
+					($frame_seconds,$frame_msecs,
+					 $frame_length_inc,$frame_length_orig) 
+					 = unpack('NNNN',$header_rec);
+				} else {
+					($frame_seconds,$frame_msecs,
+					 $frame_length_inc,$frame_length_orig) 
+					 = unpack('VVVV',$header_rec);
+				}
+			} else {			# 64-bit?
+				if ($self->{bigendian}) {
+					($frame_seconds,$frame_msecs,
+					 $frame_length_inc,$frame_length_orig) 
+					 = unpack('IINN',$header_rec);
+				} else {
+					($frame_seconds,$frame_msecs,
+					 $frame_length_inc,$frame_length_orig) 
+					 = unpack('IIVV',$header_rec);
+				}
+			}
 
 		}
+
+		### Fetch extra info if in modified format
+		if ($self->{style} =~ /^modified/) {
+			$length = read(TCPDUMPFILE,$more,8);
+		}
+	
+		### Check for skip bytes
+		if (defined $self->{skip}) {
+			$length = read(TCPDUMPFILE,$more,$self->{skip});
+		}
+
+		### Fetch the data
 		$length = read(TCPDUMPFILE,$frame_data,$frame_length_inc);
 
 		$frame_drops = $frame_length_orig - $frame_length_inc;
@@ -259,8 +377,17 @@ This module can read the data and headers from tcpdump logs
 
 =item new ()
 
-Constructor, return a TcpDumpLog object. If your OS uses 
-64-bit timestamps, supply an argument of "64".
+Constructor, return a TcpDumpLog object. 
+
+=item new (BITS)
+
+This optional argument is to force reading timestamps of that number of bits. 
+eg new(32). Could be needed when processing tcpdumps from one OS on another.
+
+=item new (BITS,SKIP)
+
+This second options argument is how many bytes to skip for every record header.
+"SuSE linux 6.3" style logs need this set to 4, everything else (so far) is 0.
 
 =item read (FILENAME)
 
@@ -344,10 +471,15 @@ need updating.
 
 =head1 BUGS
 
-If this module is not reading your logs correctly, try creating the
-tcpdump object in 64-bit timestamp mode, eg 
-"$log = Net::TcpDumpLog->new(64);". If the problem persists, try printing 
-out the log version using version() and checking it is "2.4".
+If this module is not reading your logs correctly, try forcing the timestamp
+bits to either 32 or 64, eg "$log = Net::TcpDumpLog->new(32);". 
+Also try printing out the log version using version() and checking it is "2.4".
+
+There is a certain tcpdump log format "SuSE linux 6.3" that put extra fields
+in the log without any clear identifier. If you think you have this log,
+put a "4" as a second argument to new, eg "$log = Net::TcpDumpLog->new(32,4);".
+(The 4 specifies how many extra header bytes to skip). 
+
 
 =head1 TODO
 

@@ -18,7 +18,7 @@ ok($exists,1);
 
 # 2. Test we can load the file as usual
 print "2. Loading tcpdump file... ";
-$log = Net::TcpDumpLog->new();
+$log = Net::TcpDumpLog->new(32);	# force 32-bits to match this file
 $log->read("tcpdumplog");
 ok(1);
 

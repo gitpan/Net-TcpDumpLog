@@ -1,4 +1,4 @@
-#!/bin/perl
+#!/usr/bin/perl
 #
 # example01.pl - Example of Net::TcpDumpLog. Prints out frame arrival times.
 #
@@ -6,8 +6,9 @@
 
 use Net::TcpDumpLog;
 
-$log = Net::TcpDumpLog->new;
-$log->read("tcpdumplog");
+$log = Net::TcpDumpLog->new(32);	# Don't copy the "32"! This is only
+$log->read("tcpdumplog");		#  used here because our sample file
+					#  has 32 bit timestamps. use new().
 
 $count = $log->maxindex + 1;
 @Indexes = $log->indexes;
